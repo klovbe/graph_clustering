@@ -15,7 +15,7 @@ sys.path.append('./')
 sys.path.append(os.path.realpath(__file__))
 
 from keras.engine.topology import Layer, InputSpec
-from keras.layers import Input, Dense, Lambda, Subtract, merge, Dropout, BatchNormalization, Activation
+from keras.layers import Input, Dense, Lambda, Subtract, merge
 from keras.models import Model, model_from_json
 import keras.regularizers as Reg
 from keras.optimizers import SGD, Adam
@@ -27,7 +27,6 @@ from datasets import *
 from sklearn.cluster import KMeans
 import metrics
 from sklearn.manifold import TSNE
-from sklearn.decomposition import PCA
 
 def get_encoder(node_num, d, K, n_units, nu1, nu2, activation_fn):
     # Input
@@ -106,12 +105,12 @@ def autoencoder(dims, nu1, nu2, act='relu', init='glorot_uniform'):
                   name='decoder_%d' % i)(y)
 
     # output
-    y = Dense(dims[0], activation='sigmoid', kernel_initializer=init, kernel_regularizer=Reg.l1_l2(l1=nu1, l2=nu2),
+    y = Dense(dims[0], activation='linear', kernel_initializer=init, kernel_regularizer=Reg.l1_l2(l1=nu1, l2=nu2),
               name='decoder_0')(y)
 
     return Model(inputs=x, outputs=y, name='AE'), Model(inputs=x, outputs=h, name='encoder')
 
-def autoencoder_bn(dims, nu1, nu2, act='relu', init='glorot_uniform'):
+def autoencoder_bn(dims, act='relu', init='glorot_uniform'):
     """
     Fully connected auto-encoder model, symmetric.
     Arguments:
@@ -128,87 +127,24 @@ def autoencoder_bn(dims, nu1, nu2, act='relu', init='glorot_uniform'):
 
     # internal layers in encoder
     for i in range(n_stacks-1):
-        h = Dense(dims[i + 1], kernel_initializer=init, name='encoder_%d' % i, kernel_regularizer=Reg.l1_l2(l1=nu1, l2=nu2))(h)
-        h = BatchNormalization()(h)
+        h = Dense(dims[i + 1], kernel_initializer=init, name='encoder_%d' % i)(h)
+        h = normalization.BatchNormalization()(h)
         h = Activation(activation=act)(h)
 
     # hidden layer
-    h = Dense(dims[-1], kernel_initializer=init, name='encoder_%d' % (n_stacks - 1), kernel_regularizer=Reg.l1_l2(l1=nu1, l2=nu2))(h)
-    # hidden layer, features are extracted from here
+    h = Dense(dims[-1], kernel_initializer=init, name='encoder_%d' % (n_stacks - 1))(h)  # hidden layer, features are extracted from here
 
     y = h
     # internal layers in decoder
     for i in range(n_stacks-1, 0, -1):
-        y = Dense(dims[i], kernel_initializer=init, name='decoder_%d' % i, kernel_regularizer=Reg.l1_l2(l1=nu1, l2=nu2))(y)
-        y = BatchNormalization()(y)
+        y = Dense(dims[i], kernel_initializer=init, name='decoder_%d' % i)(y)
+        y = normalization.BatchNormalization()(y)
         y = Activation(activation=act)(y)
 
     # output
-    y = Dense(dims[0], activation='sigmoid', kernel_initializer=init, name='decoder_0', kernel_regularizer=Reg.l1_l2(l1=nu1, l2=nu2))(y)
+    y = Dense(dims[0], activation='linear', kernel_initializer=init, name='decoder_0')(y)
 
     return Model(inputs=x, outputs=y, name='AE'), Model(inputs=x, outputs=h, name='encoder')
-
-
-class ClusteringLayer(Layer):
-    """
-    Clustering layer converts input sample (feature) to soft label, i.e. a vector that represents the probability of the
-    sample belonging to each cluster. The probability is calculated with student's t-distribution.
-
-    # Example
-    ```
-        model.add(ClusteringLayer(n_clusters=10))
-    ```
-    # Arguments
-        n_clusters: number of clusters.
-        weights: list of Numpy array with shape `(n_clusters, n_features)` witch represents the initial cluster centers.
-        alpha: parameter in Student's t-distribution. Default to 1.0.
-    # Input shape
-        2D tensor with shape: `(n_samples, n_features)`.
-    # Output shape
-        2D tensor with shape: `(n_samples, n_clusters)`.
-    """
-
-    def __init__(self, n_clusters, weights=None, alpha=1.0, **kwargs):
-        if 'input_shape' not in kwargs and 'input_dim' in kwargs:
-            kwargs['input_shape'] = (kwargs.pop('input_dim'),)
-        super(ClusteringLayer, self).__init__(**kwargs)
-        self.n_clusters = n_clusters
-        self.alpha = alpha
-        self.initial_weights = weights
-        self.input_spec = InputSpec(ndim=2)
-
-    def build(self, input_shape):
-        assert len(input_shape) == 2
-        input_dim = input_shape[1]
-        self.input_spec = InputSpec(dtype=K.floatx(), shape=(None, input_dim))
-        self.clusters = self.add_weight((self.n_clusters, input_dim), initializer='glorot_uniform', name='clusters')
-        if self.initial_weights is not None:
-            self.set_weights(self.initial_weights)
-            del self.initial_weights
-        self.built = True
-
-    def call(self, inputs, **kwargs):
-        """ student t-distribution, as same as used in t-SNE algorithm.
-                 q_ij = 1/(1+dist(x_i, u_j)^2), then normalize it.
-        Arguments:
-            inputs: the variable containing data, shape=(n_samples, n_features)
-        Return:
-            q: student's t-distribution, or soft labels for each sample. shape=(n_samples, n_clusters)
-        """
-        q = 1.0 / (1.0 + (K.sum(K.square(K.expand_dims(inputs, axis=1) - self.clusters), axis=2) / self.alpha))
-        #self.clusters:(n_clusters, embedding dim), inputs:(None, embedding dim)
-        q **= (self.alpha + 1.0) / 2.0
-        q = K.transpose(K.transpose(q) / K.sum(q, axis=1)) # q:(None,n_clusters)
-        return q
-
-    def compute_output_shape(self, input_shape):
-        assert input_shape and len(input_shape) == 2
-        return input_shape[0], self.n_clusters
-
-    def get_config(self):
-        config = {'n_clusters': self.n_clusters}
-        base_config = super(ClusteringLayer, self).get_config()
-        return dict(list(base_config.items()) + list(config.items()))
 
 # Objectives
 def weighted_mse_x(y_true, y_pred):
@@ -236,7 +172,7 @@ def weighted_mse_y(y_true, y_pred):
 
 class SDNE(object):
 
-    def __init__(self, dims, bn, init, nu1, nu2, alpha, gamma, n_clusters, *hyper_dict, **kwargs):
+    def __init__(self, dims1, dims2, bn, init, nu1, nu2, alpha, gamma, n_clusters, *hyper_dict, **kwargs):
         ''' Initialize the SDNE class
 
         Args:
@@ -259,64 +195,61 @@ class SDNE(object):
 
         self.alpha = alpha
         self.gamma = gamma
-        self.dims = dims
-        self.node_num = self.dims[0]
-        self.n_stacks = len(self.dims) -1
-        self.n_clusters = n_clusters
+        self.dims1 = dims1
+        self.dims2 = dims2
+        self.gene_num = self.dims1[0]
+        self.cell_num = self.dims2[0]
+        self.n_stacks1 = len(self.dims1) -1
+        self.n_stacks2 = len(self.dims2) -1
 
         # Generate encoder, decoder and autoencoder
         # If cannot use previous step information, initialize new models
         if bn:
-            self.autoencoder, self.encoder = autoencoder_bn(self.dims, nu1=nu1, nu2=nu2, init=init)
+            self.autoencoder1, self.encoder1 = autoencoder_bn(self.dims1, nu1=nu1, nu2=nu2, init=init)
+            self.autoencoder2, self.encoder2 = autoencoder(self.dims2, nu1=nu1, nu2=nu2, init=init)
         else:
-            self.autoencoder, self.encoder = autoencoder(self.dims, nu1=nu1, nu2=nu2, init=init)
+            self.autoencoder1, self.encoder1 = autoencoder(self.dims1, nu1=nu1, nu2=nu2, init=init)
+            self.autoencoder2, self.encoder2 = autoencoder(self.dims2, nu1=nu1, nu2=nu2, init=init)
 
         # Initialize self.model
         # Input
-        x_in = Input(shape=(2 * self.node_num,), name='x_in')
-        x1 = Lambda(
-            lambda x: x[:, 0:self.node_num],
-            output_shape=(self.node_num,)
-        )(x_in)
-        x2 = Lambda(
-            lambda x: x[:, self.node_num:2 * self.node_num],
-            output_shape=(self.node_num,)
-        )(x_in)
+        x1 = Input(shape=(self.gene_num,), name='x1_in')
+        x2 = Input(shape=(self.cell_num,), name='x2_in')
         # Process inputs
-        x_hat1 = self.autoencoder(x1)
-        x_hat2 = self.autoencoder(x2)
-        y1 = self.encoder(x1)
-        y2 = self.encoder(x2)
+        x_hat1 = self.autoencoder1(x1)
+        x_hat2 = self.autoencoder2(x2)
+        y1 = self.encoder1(x1)
+        y2 = self.encoder2(x2)
         # Outputs
         x_diff1 = Subtract()([x_hat1, x1])
         x_diff2 = Subtract()([x_hat2, x2])
         y_diff = Subtract()([y2, y1])
 
-        clustering_layer = ClusteringLayer(self.n_clusters, name='clustering')
+        def cosine_distance(vests):
+            x, y = vests
+            # x = K.l2_normalize(x, axis=-1)
+            # y = K.l2_normalize(y, axis=-1)
+            return -K.mean(x * y, axis=-1, keepdims=True)
 
-        clustering_layer1 = clustering_layer(y1)
-        clustering_layer2 = clustering_layer(y2)
+        def cos_dist_output_shape(shapes):
+            shape1, shape2 = shapes
+            return (shape1[0], 1)
 
+        distance = Lambda(cosine_distance, output_shape=cos_dist_output_shape)([y1, y2])
         # Model
         # self.pre_model = Model(input=x_in, output=[x_diff1, x_diff2])
-        self.pre_model = Model(input=x_in, output=[x_diff1, x_diff2, y_diff])
-        self.cluster_model = Model(input=x_in, output=[x_diff1, x_diff2, y_diff, clustering_layer1, clustering_layer2])
-        self.predict_model = Model(input=x_in, output=[y1, clustering_layer1])
+        self.model = Model(input=[x1, x2], output=[x_diff1, x_diff2, y_diff])
 
-    def pretrain(self, x, optimizer='adam', epochs=200, batch_size=256, beta=1):
+
+    def pretrain(self, x, optimizer='adam', epochs=200, batch_size=256):
         print('...Pretraining...')
-        self.pre_model.compile(optimizer=optimizer, loss=[weighted_mse_x, weighted_mse_x, weighted_mse_y])
+        self.model.compile(optimizer=optimizer, loss=[weighted_mse_x, weighted_mse_x, weighted_mse_y])
         # begin pretraining
         t0 = time()
-        self.pre_model.fit_generator(generator=batch_generator_sdne(x, batch_size=batch_size, shuffle=True, beta=beta),
-                                     epochs=epochs, steps_per_epoch= (self.node_num//batch_size))
-        print('Pretraining time: ', time() - t0)
-        self.pretrained = True
+        self.model.fit_generator(generator=batch_generator_sdne(x, batch_size=batch_size, shuffle=True, beta=beta),
+                                     epochs=epochs)
+        print('training time: ', time() - t0)
 
-    @staticmethod
-    def target_distribution(q):
-        weight = q ** 2 / q.sum(0)
-        return (weight.T / weight.sum(1)).T
 
     # def fit(self, x, graph=None, edge_f=None,
     #                     is_weighted=False, no_python=False):
@@ -340,7 +273,7 @@ class SDNE(object):
     #     t2 = time()
     #     return self.Y, (t2 - t1)
 
-    def fit(self, x_train, optimizer='adam', beta =1, y = None, epochs=500,
+    def fit(self, x_train, optimizer='adam', beta =1, y = None, epoch=500,
             batch_size=256, update_interval=5, early_stopping=20, tol=0.01):
 
         double_x = np.append(x_train, x_train, axis=1)
@@ -349,7 +282,7 @@ class SDNE(object):
         t1 = time()
         print('Initializing cluster centers with k-means.')
         kmeans = KMeans(n_clusters=self.n_clusters, n_init=20)
-        encoder_out = self.encoder.predict(x_train)
+        _, encoder_out = self.autoencoder.predict(x_train)
         y_pred = kmeans.fit_predict(encoder_out)
         if y is not None:
             acc = np.round(metrics.acc(y, y_pred), 5)
@@ -357,14 +290,10 @@ class SDNE(object):
             ari = np.round(metrics.ari(y, y_pred), 5)
             print('kmeans : acc = %.5f, nmi = %.5f, ari = %.5f' % (acc, nmi, ari))
             X_embedded = TSNE(n_components=2).fit_transform(encoder_out)
-            # fig = plt.gcf()
-            # plt.savefig("k-means.png")
             plt.figure(figsize=(12, 10))
             plt.scatter(X_embedded[:, 0], X_embedded[:, 1], c=y)
             plt.colorbar()
             plt.show()
-            plt.savefig("k-means.png")
-        print("K-means result:")
         print(np.bincount(y_pred))
 
         # y_pred = kmeans.fit_predict(x_train)
@@ -381,7 +310,7 @@ class SDNE(object):
         #     self.model.fit(x=x_train, y=[p, y0, x_train], batch_size=batch_size)
 
         # Step 2: deep clustering
-        for ite in range(int(epochs)):
+        for ite in range(int(epoch)):
             # train on batch
             if ite % update_interval == 0:
                 _, q = self.predict_model.predict(double_x, verbose=0)
@@ -395,22 +324,22 @@ class SDNE(object):
                     nmi = np.round(metrics.nmi(y, y_pred), 5)
                     ari = np.round(metrics.ari(y, y_pred), 5)
                     print('acc = %.5f, nmi = %.5f, ari = %.5f' % (acc, nmi, ari))
-                print("predicted bin")
                 print(np.bincount(y_pred))
                 if ite > update_interval and delta_label < tol:
                     print("Early stopping...")
                     break
-            print(ite)
+
             self.cluster_model.fit_generator(
-                generator=batch_generator_dec(x_train, p, batch_size=batch_size, shuffle=True, beta=beta),
-                shuffle=False, steps_per_epoch=(self.node_num // batch_size)
+                generator=batch_generator_sdne(x_train, batch_size=batch_size, shuffle=True, beta=beta),
+                shuffle=False
             )
 
         print('training time: ', time() - t1)
         # save the trained model
 
-        encoder_out = self.encoder.predict(x_train)
-        _, q = self.predict_model.predict(double_x, verbose=0)
+        print("saving predict data...")
+        _, encoder_out = self.autoencoder.predict(x_train)
+        _, _, _, q, _ = self.cluster_model.predict(double_x, verbose=0)
         #k-means
         y_pred = kmeans.fit_predict(encoder_out)
         if y is not None:
@@ -426,9 +355,8 @@ class SDNE(object):
             acc = np.round(metrics.acc(y, y_pred), 5)
             nmi = np.round(metrics.nmi(y, y_pred), 5)
             ari = np.round(metrics.ari(y, y_pred), 5)
-            print('dec : acc = %.5f, nmi = %.5f, ari = %.5f' % (acc, nmi, ari))
+            print('acc = %.5f, nmi = %.5f, ari = %.5f' % (acc, nmi, ari))
             X_embedded = TSNE(n_components=2).fit_transform(encoder_out)
-            plt.savefig("dec.png")
             plt.figure(figsize=(12, 10))
             plt.scatter(X_embedded[:, 0], X_embedded[:, 1], c=y)
             plt.colorbar()
@@ -441,7 +369,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='train',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--batch_size', default=256, type=int)
-    parser.add_argument('--epochs', default=500, type=int)
+    parser.add_argument('--epoch', default=500, type=int)
     parser.add_argument('--pretrain_epochs', default=200, type=int)
     parser.add_argument('--update_interval', default=5, type=int)
     parser.add_argument('--ae_weights', default=None)
@@ -466,11 +394,11 @@ if __name__ == "__main__":
     feature_parser.add_argument('--gene_scale', dest='gene_scale', action='store_true')
     feature_parser.add_argument('--no-gene_scale', dest='gene_scale', action='store_false')
     parser.set_defaults(gene_scale=True)
-    parser.add_argument("--metric", default="pearson", type=str)
+    parser.add_argument("--metirc", default="pearson", type=str)
     parser.add_argument('--gamma', default=0.1,type=float)
     parser.add_argument('--nu1', default=1e-6, type=float)
     parser.add_argument('--nu2', default=1e-6, type=float)
-    parser.add_argument('--beta', default=1.0, type=float)
+    parser.add_argument('--beta', default=1, type=float)
     parser.add_argument('--alpha', default=0.1, type=float)
     args = parser.parse_args()
     print(args)
@@ -489,37 +417,29 @@ if __name__ == "__main__":
         if not isinstance(y, (int, float)):
             y = LabelEncoder().fit_transform(y)
         n_clusters = len(np.unique(y))
+        # labeldf = pd.read_csv(args.labelpath, header=None, index_col=None)
+        # y = labeldf.values
+        # y = y.transpose()
+        # y = np.squeeze(y)
+        # n_clusters = len(np.unique(y))
         print("has {} clusters:".format(n_clusters))
         print("orginal cluster proportion: {}".format(np.bincount(y)))
-    X = PCA(n_components=50).fit_transform(graph)
-    X_embedded = TSNE(n_components=2).fit_transform(X)
-    y_pred = KMeans(n_clusters=n_clusters, n_init=40).fit_predict(X_embedded)
-    acc = np.round(metrics.acc(y, y_pred), 5)
-    nmi = np.round(metrics.nmi(y, y_pred), 5)
-    ari = np.round(metrics.ari(y, y_pred), 5)
-    print('acc = %.5f, nmi = %.5f, ari = %.5f' % (acc, nmi, ari))
-    plt.savefig("tsne.png")
-    plt.figure(figsize=(12, 10))
-    plt.scatter(X_embedded[:, 0], X_embedded[:, 1], c=y)
-    plt.colorbar()
-    plt.show()
-    plt.savefig("tsne.png")
 
     init = 'glorot_uniform'
-    optimizer = Adam(lr=0.001, beta_1=0.9, beta_2=0.999, decay=0.)
+    optimizer = Adam(lr=0.0001, beta_1=0.9, beta_2=0.999, decay=0.)
 
     # # prepare the DEC model
-    Sdne = SDNE(dims=[edges, 1000, 300, 20],bn=args.bn, init=init, nu1=args.nu1, nu2=args.nu2, alpha=args.alpha,
+    Sdne = SDNE(dims=[edges,  300, 100, 30, 10],bn=args.bn, init=init, nu1=args.nu1, nu2=args.nu2, alpha=args.alpha,
                 gamma=args.gamma, n_clusters=n_clusters)
     Sdne.pre_model.summary()
     #
     if args.ae_weights is None:
-        Sdne.pretrain(x=graph, optimizer=optimizer, epochs=args.pretrain_epochs, batch_size=args.batch_size, beta=args.beta)
+        Sdne.pretrain(x=graph, optimizer=optimizer, epochs=args.pretrain_epochs, batch_size=args.batch_size)
     else:
         Sdne.autoencoder.load_weights(args.ae_weights)
     #
     Sdne.cluster_model.summary()
 
     Sdne.fit(graph, optimizer = optimizer, beta = 1, y=y,
-             epochs=args.epochs, batch_size=args.batch_size,
+             epoch=args.epoch, batch_size=args.batch_size,
                      update_interval=args.update_interval, early_stopping=args.early_stopping, tol=args.tol)
